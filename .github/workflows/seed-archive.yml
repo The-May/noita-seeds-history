@@ -1,0 +1,67 @@
+name: Daily Seed Archive
+
+on:
+  schedule:
+    - cron: '5 0 * * *'   # 00:05 UTC daily
+  workflow_dispatch: {}   # allows manual trigger from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  archive-seed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch and parse seed data
+        run: |
+          set -euo pipefail
+
+          RAW=$(curl -sf https://takapuoli.noitagame.com/callback/ | tr -d '[:space:]')
+
+          if [ -z "$RAW" ]; then
+            echo "Empty response from callback endpoint, aborting."
+            exit 1
+          fi
+
+          echo "Raw response: $RAW"
+
+          # Format: version_hash;daily_seed;daily_practice_seed;1;
+          VERSION_HASH=$(echo "$RAW" | cut -d';' -f1)
+          DAILY_SEED=$(echo "$RAW" | cut -d';' -f2)
+          DAILY_PRACTICE_SEED=$(echo "$RAW" | cut -d';' -f3)
+
+          if [ -z "$VERSION_HASH" ] || [ -z "$DAILY_SEED" ] || [ -z "$DAILY_PRACTICE_SEED" ]; then
+            echo "Failed to parse one or more fields from: $RAW"
+            exit 1
+          fi
+
+          DATE=$(date -u +"%Y-%m-%d")
+
+          if [ ! -f seed-archive.json ]; then
+            echo "[]" > seed-archive.json
+          fi
+
+          ALREADY_EXISTS=$(jq --arg d "$DATE" 'any(.[]; .date == $d)' seed-archive.json)
+
+          if [ "$ALREADY_EXISTS" = "true" ]; then
+            echo "Entry for $DATE already exists, skipping."
+            exit 0
+          fi
+
+          jq --arg d "$DATE" \
+             --arg vh "$VERSION_HASH" \
+             --arg ds "$DAILY_SEED" \
+             --arg dps "$DAILY_PRACTICE_SEED" \
+             '. += [{"date": $d, "version_hash": $vh, "daily_seed": $ds, "daily_practice_seed": $dps}]' \
+             seed-archive.json > tmp.json
+          mv tmp.json seed-archive.json
+
+      - name: Commit and push
+        run: |
+          git config user.name "seed-bot"
+          git config user.email "seed-bot@users.noreply.github.com"
+          git add seed-archive.json
+          git diff --cached --quiet && echo "Nothing to commit" || git commit -m "Archive seed for $(date -u +%Y-%m-%d)"
+          git push
